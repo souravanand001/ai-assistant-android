@@ -80,7 +80,7 @@ class MainActivity : ComponentActivity() {
     ) { result ->
         if (result.resultCode == RESULT_OK && result.data != null) {
             val serviceIntent = Intent(this, com.app.assistant.camera.ScreenCaptureService::class.java).apply {
-                action = com.app.assistant.camera.ScreenCaptureService.ACTION_START
+                action235 = com.app.assistant.camera.ScreenCaptureService.ACTION_START
                 putExtra(com.app.assistant.camera.ScreenCaptureService.EXTRA_RESULT_CODE, result.resultCode)
                 putExtra(com.app.assistant.camera.ScreenCaptureService.EXTRA_RESULT_DATA, result.data)
             }
