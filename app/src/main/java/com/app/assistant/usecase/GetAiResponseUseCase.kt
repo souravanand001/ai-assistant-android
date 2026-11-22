@@ -25,7 +25,7 @@ class GetAiResponseUseCase(
             LlmProvider.GROQ
         }
 
-        var apiKey = settingsRepository.getChatApiKey()
+        var apiKey = settingsRepository.getChatApiKey(provider)
         if (apiKey.isNullOrBlank() && provider == LlmProvider.GROQ) {
             apiKey = com.app.assistant.BuildConfig.GROQ_API_KEY
         }
@@ -67,7 +67,7 @@ class GetAiResponseUseCase(
             LlmProvider.GROQ
         }
 
-        var apiKey = settingsRepository.getChatApiKey()
+        var apiKey = settingsRepository.getChatApiKey(provider)
         if (apiKey.isNullOrBlank() && provider == LlmProvider.GROQ) {
             apiKey = com.app.assistant.BuildConfig.GROQ_API_KEY
         }

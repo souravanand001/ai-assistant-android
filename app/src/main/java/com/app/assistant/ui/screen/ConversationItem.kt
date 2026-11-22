@@ -390,7 +390,7 @@ private fun OtherCard(
                     }
                 }
 
-                if (answerText.isNotEmpty() || conversation.isStreaming) {
+                if (answerText.isNotEmpty()) {
                     val displayAnswer = if (conversation.isStreaming) {
                         "$answerText ▮"
                     } else {
@@ -401,6 +401,8 @@ private fun OtherCard(
                         markdown = displayAnswer,
                         modifier = Modifier
                     )
+                } else if (conversation.isStreaming && thinkingText == null) {
+                    LoadingDots()
                 }
             }
         }

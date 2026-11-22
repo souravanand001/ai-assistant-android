@@ -58,9 +58,11 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.app.assistant.R
+import com.app.assistant.llm.CustomServerPreset
 import com.app.assistant.llm.LlmProvider
 import com.app.assistant.viewmodel.SettingsViewModel
 import com.app.assistant.viewmodel.VerificationState
+import androidx.compose.animation.AnimatedVisibility
 
 import androidx.compose.material3.Switch
 import androidx.compose.material3.RadioButton
@@ -96,8 +98,8 @@ fun SettingsScreen(
 ) {
     val initialYoutubeKey = remember { settingsViewModel.loadYoutubeKey() }
     val initialEdgeTtsKey = remember { settingsViewModel.loadEdgeTtsSubscriptionKey() }
-    val initialChatKey = remember { settingsViewModel.loadChatKey() }
     val initialProvider = remember { settingsViewModel.loadLlmProvider() }
+    val initialChatKey = remember { settingsViewModel.loadChatKey(initialProvider) }
     val initialModel = remember { settingsViewModel.loadLlmModel() }
     val initialCustomUrl = remember { settingsViewModel.loadLlmCustomUrl() }
     val initialCustomHeaders = remember { settingsViewModel.loadLlmCustomHeaders() }
@@ -251,6 +253,14 @@ fun SettingsScreenContent(
     var customUserRole by rememberSaveable { mutableStateOf(initialCustomUserRole) }
     var customAssistantRole by rememberSaveable { mutableStateOf(initialCustomAssistantRole) }
 
+    val isAutoDetecting by settingsViewModel.isAutoDetecting.collectAsState()
+    val autoDetectStatus by settingsViewModel.autoDetectStatus.collectAsState()
+    val autoDetectSuccess by settingsViewModel.autoDetectSuccess.collectAsState()
+
+    var selectedPreset by rememberSaveable { mutableStateOf(CustomServerPreset.OPENAI_COMPATIBLE) }
+    var presetDropdownExpanded by remember { mutableStateOf(false) }
+    var showAdvancedCustomSettings by rememberSaveable { mutableStateOf(false) }
+
     var showTranslationSheet by remember { mutableStateOf(false) }
 
 
@@ -396,12 +406,16 @@ fun SettingsScreenContent(
                                               provider = p
                                               settingsViewModel.updateLlmProvider(p)
                                               onResetVerificationState()
+                                              val newKey = settingsViewModel.loadChatKey(p)
+                                              apiKey2 = newKey
                                               if (p != LlmProvider.CUSTOM) {
-                                                  model = p.defaultModel
-                                                  settingsViewModel.updateLlmModel(p.defaultModel)
-                                                  val currentKey = apiKey2
-                                                  if (currentKey.isNotBlank() || p == LlmProvider.OLLAMA || p == LlmProvider.OPEN_ROUTER) {
-                                                      onFetchModelsForProvider(p, currentKey, "", "")
+                                                  if (newKey.isBlank() && p != LlmProvider.OLLAMA) {
+                                                      model = ""
+                                                      settingsViewModel.updateLlmModel("")
+                                                  } else {
+                                                      model = p.defaultModel
+                                                      settingsViewModel.updateLlmModel(p.defaultModel)
+                                                      onFetchModelsForProvider(p, newKey, "", "")
                                                   }
                                               } else {
                                                  model = p.defaultModel
@@ -438,9 +452,9 @@ fun SettingsScreenContent(
                                                      customAssistantRole = p.config.assistantRole
                                                      settingsViewModel.updateLlmCustomAssistantRole(p.config.assistantRole)
                                                  }
-                                             }
-                                          }
-                                          expanded = false
+                                              }
+                                           }
+                                           expanded = false
                                       }
                                   )
                               }
@@ -448,7 +462,43 @@ fun SettingsScreenContent(
                       }
   
                       Spacer(modifier = Modifier.height(12.dp))
-  
+
+                      OutlinedTextField(
+                          value = apiKey2,
+                          onValueChange = {
+                              apiKey2 = it
+                              settingsViewModel.updateChatApiKey(it, provider)
+                              onResetVerificationState()
+                              if (it.isNotBlank()) {
+                                  if (model.isBlank()) {
+                                      model = provider.defaultModel
+                                      settingsViewModel.updateLlmModel(provider.defaultModel)
+                                  }
+                                  onFetchModelsForProvider(provider, it, customUrl, customHeaders)
+                              }
+                          },
+                          label = { Text(if (provider == LlmProvider.CUSTOM) "Chat API Key (Optional for local servers)" else stringResource(id = R.string.chat_api_key)) },
+                          visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                          trailingIcon = {
+                              IconButton(
+                                  onClick = {
+                                      targetKeyField = "chat"
+                                      showQrScanner = true
+                                  }
+                              ) {
+                                  Icon(
+                                      painter = painterResource(id = R.drawable.ic_qr_code_scanner),
+                                      contentDescription = "Scan Chat API Key"
+                                  )
+                              }
+                          },
+                          shape = RoundedCornerShape(12.dp),
+                          modifier = Modifier.fillMaxWidth()
+                      )
+
+                      Spacer(modifier = Modifier.height(12.dp))
+
+                      val isKeyMissing = apiKey2.isBlank() && provider != LlmProvider.OLLAMA && provider != LlmProvider.CUSTOM
                       val modelsList = fetchedModelsMap[provider] ?: provider.suggestedModels
   
                       Box(modifier = Modifier.fillMaxWidth()) {
@@ -460,9 +510,14 @@ fun SettingsScreenContent(
                                   onResetVerificationState()
                               },
                               label = { Text(stringResource(id = R.string.llm_model)) },
+                              placeholder = if (isKeyMissing) {
+                                  { Text("Enter API key to select model") }
+                              } else null,
                               shape = RoundedCornerShape(12.dp),
                               modifier = Modifier.fillMaxWidth(),
-                              supportingText = if (!modelFetchError.isNullOrBlank()) {
+                              supportingText = if (isKeyMissing) {
+                                  { Text("Please enter ${provider.displayName} API key to select models", color = MaterialTheme.colorScheme.error) }
+                              } else if (!modelFetchError.isNullOrBlank()) {
                                   { Text(modelFetchError, color = MaterialTheme.colorScheme.error) }
                               } else null,
                               trailingIcon = {
@@ -479,7 +534,30 @@ fun SettingsScreenContent(
                               onDismissRequest = { modelDropdownExpanded = false },
                               modifier = Modifier.fillMaxWidth()
                           ) {
-                              if (isFetchingModels) {
+                              if (isKeyMissing) {
+                                  DropdownMenuItem(
+                                      text = {
+                                          Row(
+                                              verticalAlignment = Alignment.CenterVertically,
+                                              modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                                          ) {
+                                              Icon(
+                                                  imageVector = Icons.Default.Info,
+                                                  contentDescription = "API key required",
+                                                  tint = MaterialTheme.colorScheme.primary,
+                                                  modifier = Modifier.size(20.dp)
+                                              )
+                                              Spacer(modifier = Modifier.width(8.dp))
+                                              Text(
+                                                  text = "Please enter your ${provider.displayName} API key first to view available models.",
+                                                  style = MaterialTheme.typography.bodyMedium,
+                                                  color = MaterialTheme.colorScheme.onSurface
+                                              )
+                                          }
+                                      },
+                                      onClick = { modelDropdownExpanded = false }
+                                  )
+                              } else if (isFetchingModels) {
                                   DropdownMenuItem(
                                       text = { 
                                           Row(
@@ -497,7 +575,8 @@ fun SettingsScreenContent(
                                       onClick = {}
                                   )
                               } else {
-                                  if (provider != LlmProvider.CUSTOM) {
+                                  val canFetch = provider != LlmProvider.CUSTOM || customUrl.isNotBlank()
+                                  if (canFetch) {
                                       DropdownMenuItem(
                                           text = {
                                               Row(
@@ -543,42 +622,37 @@ fun SettingsScreenContent(
                                       }
                                   } else if (provider == LlmProvider.CUSTOM) {
                                       DropdownMenuItem(
-                                          text = { Text("No suggested models. Please enter your model name.") },
-                                          onClick = { modelDropdownExpanded = false }
+                                          text = { Text("No models loaded yet. Tap 'Fetch latest models from API' above or enter model name manually.") },
+                                          onClick = {
+                                              if (customUrl.isNotBlank()) {
+                                                  onFetchModelsForProvider(
+                                                      provider,
+                                                      apiKey2,
+                                                      customUrl,
+                                                      customHeaders
+                                                  )
+                                              } else {
+                                                  modelDropdownExpanded = false
+                                              }
+                                          }
+                                      )
+                                  } else {
+                                      DropdownMenuItem(
+                                          text = { Text("No models loaded yet. Tap 'Fetch latest models from API' above.") },
+                                          onClick = {
+                                              onFetchModelsForProvider(
+                                                  provider,
+                                                  apiKey2,
+                                                  customUrl,
+                                                  customHeaders
+                                              )
+                                          }
                                       )
                                   }
                               }
                           }
                       }
-  
-                      Spacer(modifier = Modifier.height(12.dp))
-  
-                      OutlinedTextField(
-                          value = apiKey2,
-                          onValueChange = { 
-                              apiKey2 = it
-                              settingsViewModel.updateChatApiKey(it)
-                              onResetVerificationState()
-                          },
-                          label = { Text(stringResource(id = R.string.chat_api_key)) },
-                          visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
-                          trailingIcon = {
-                              IconButton(
-                                  onClick = {
-                                      targetKeyField = "chat"
-                                      showQrScanner = true
-                                  }
-                              ) {
-                                  Icon(
-                                      painter = painterResource(id = R.drawable.ic_qr_code_scanner),
-                                      contentDescription = "Scan Chat API Key"
-                                  )
-                              }
-                          },
-                          shape = RoundedCornerShape(12.dp),
-                          modifier = Modifier.fillMaxWidth()
-                      )
-  
+
                       Spacer(modifier = Modifier.height(16.dp))
   
                       // Verification Section
@@ -622,120 +696,322 @@ fun SettingsScreenContent(
                             description = "Define custom API mappings and endpoints",
                             icon = R.drawable.ic_settings
                         )
-                        Spacer(modifier = Modifier.height(8.dp))
+                        Spacer(modifier = Modifier.height(12.dp))
 
-                         OutlinedTextField(
+                        // API Endpoint URL
+                        OutlinedTextField(
                             value = customUrl,
                             onValueChange = { 
                                 customUrl = it
                                 settingsViewModel.updateLlmCustomUrl(it)
+                                settingsViewModel.clearAutoDetectStatus()
                                 onResetVerificationState()
                             },
                             label = { Text("API Endpoint URL") },
+                            placeholder = { Text("e.g. http://192.168.1.3:11434") },
                             shape = RoundedCornerShape(12.dp),
                             modifier = Modifier.fillMaxWidth()
                         )
 
-                        Spacer(modifier = Modifier.height(12.dp))
+                        Spacer(modifier = Modifier.height(8.dp))
 
-                        OutlinedTextField(
-                            value = customHeaders,
-                            onValueChange = { 
-                                customHeaders = it
-                                settingsViewModel.updateLlmCustomHeaders(it)
-                                onResetVerificationState()
+                        // Auto-Detect & Fetch Models Button
+                        Button(
+                            onClick = {
+                                settingsViewModel.autoDetectAndApplyConfig(
+                                    baseUrl = customUrl,
+                                    apiKey = apiKey2,
+                                    onApplied = { detected ->
+                                        customUrl = detected.completionUrl
+                                        val headersJson = if (detected.headers.isNotEmpty()) {
+                                            val entries = detected.headers.map { "\"${it.key}\": \"${it.value.replace("\"", "\\\"")}\"" }
+                                            "{${entries.joinToString(", ")}}"
+                                        } else "{}"
+                                        customHeaders = headersJson
+                                        customResponsePath = detected.responsePath
+                                        customRequestTemplate = detected.requestTemplate
+                                        customMessageFormat = detected.messageFormat
+                                        customSystemRole = detected.systemRole ?: ""
+                                        customUserRole = detected.userRole
+                                        customAssistantRole = detected.assistantRole
+                                        if (detected.availableModels.isNotEmpty()) {
+                                            model = detected.availableModels.first()
+                                        }
+                                        selectedPreset = if (detected.serverType == "Ollama Native") {
+                                            CustomServerPreset.OLLAMA_NATIVE
+                                        } else {
+                                            CustomServerPreset.OPENAI_COMPATIBLE
+                                        }
+                                    }
+                                )
                             },
-                            label = { Text("Custom Headers (JSON)") },
+                            enabled = !isAutoDetecting && customUrl.isNotBlank(),
                             shape = RoundedCornerShape(12.dp),
                             modifier = Modifier.fillMaxWidth()
-                        )
+                        ) {
+                            if (isAutoDetecting) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    strokeWidth = 2.dp,
+                                    color = MaterialTheme.colorScheme.onPrimary
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Detecting Server...")
+                            } else {
+                                Icon(
+                                    painter = painterResource(id = R.drawable.ic_restart),
+                                    contentDescription = "Auto-Detect",
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Auto-Detect Server & Models", fontWeight = FontWeight.SemiBold)
+                            }
+                        }
+
+                        // Auto-Detect Status Banner
+                        if (!autoDetectStatus.isNullOrBlank()) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Card(
+                                colors = CardDefaults.cardColors(
+                                    containerColor = if (autoDetectSuccess == true) {
+                                        Color(0xFF4CAF50).copy(alpha = 0.1f)
+                                    } else {
+                                        MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.3f)
+                                    }
+                                ),
+                                shape = RoundedCornerShape(8.dp),
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (autoDetectSuccess == true) Color(0xFF4CAF50).copy(alpha = 0.4f)
+                                    else MaterialTheme.colorScheme.error.copy(alpha = 0.4f)
+                                ),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(
+                                        imageVector = if (autoDetectSuccess == true) Icons.Default.Check else Icons.Default.Info,
+                                        contentDescription = null,
+                                        tint = if (autoDetectSuccess == true) Color(0xFF4CAF50) else MaterialTheme.colorScheme.error,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        text = autoDetectStatus ?: "",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                }
+                            }
+                        }
 
                         Spacer(modifier = Modifier.height(12.dp))
 
-                        OutlinedTextField(
-                            value = customResponsePath,
-                            onValueChange = { 
-                                customResponsePath = it
-                                settingsViewModel.updateLlmCustomResponsePath(it)
-                                onResetVerificationState()
-                            },
-                            label = { Text("Response Extraction JSON Path") },
-                            shape = RoundedCornerShape(12.dp),
-                            modifier = Modifier.fillMaxWidth()
-                        )
+                        // Preset Selector
+                        Box(modifier = Modifier.fillMaxWidth()) {
+                            OutlinedTextField(
+                                value = selectedPreset.displayName,
+                                onValueChange = {},
+                                readOnly = true,
+                                label = { Text("Server Compatibility Preset") },
+                                supportingText = { Text(selectedPreset.description) },
+                                trailingIcon = {
+                                    IconButton(onClick = { presetDropdownExpanded = !presetDropdownExpanded }) {
+                                        Icon(
+                                            painter = painterResource(id = R.drawable.ic_arrow_drop_down),
+                                            contentDescription = "Select Preset"
+                                        )
+                                    }
+                                },
+                                shape = RoundedCornerShape(12.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            DropdownMenu(
+                                expanded = presetDropdownExpanded,
+                                onDismissRequest = { presetDropdownExpanded = false },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                CustomServerPreset.entries.forEach { p ->
+                                    DropdownMenuItem(
+                                        text = {
+                                            Column {
+                                                Text(p.displayName, fontWeight = FontWeight.SemiBold)
+                                                Text(p.description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                            }
+                                        },
+                                        onClick = {
+                                            selectedPreset = p
+                                            presetDropdownExpanded = false
+                                            settingsViewModel.applyCustomPreset(
+                                                preset = p,
+                                                currentUrl = customUrl,
+                                                apiKey = apiKey2,
+                                                onApplied = { url, headers, respPath, template, format, sysRole, userRole, assRole ->
+                                                    customUrl = url
+                                                    customHeaders = headers
+                                                    customResponsePath = respPath
+                                                    customRequestTemplate = template
+                                                    customMessageFormat = format
+                                                    customSystemRole = sysRole
+                                                    customUserRole = userRole
+                                                    customAssistantRole = assRole
+                                                }
+                                            )
+                                        }
+                                    )
+                                }
+                            }
+                        }
 
                         Spacer(modifier = Modifier.height(12.dp))
 
-                        OutlinedTextField(
-                            value = customRequestTemplate,
-                            onValueChange = { 
-                                customRequestTemplate = it
-                                settingsViewModel.updateLlmCustomRequestTemplate(it)
-                                onResetVerificationState()
-                            },
-                            label = { Text("Request Body JSON Template") },
+                        // Collapsible Section for Advanced Manual Settings
+                        Surface(
                             shape = RoundedCornerShape(12.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)),
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(120.dp),
-                            maxLines = 10
-                        )
+                                .clickable { showAdvancedCustomSettings = !showAdvancedCustomSettings }
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "Advanced Payload & Role Mappings",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                    Text(
+                                        text = if (showAdvancedCustomSettings) "Tap to collapse manual configuration" else "Only needed for non-standard custom APIs",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                Icon(
+                                    painter = painterResource(id = if (showAdvancedCustomSettings) R.drawable.ic_up_arrow else R.drawable.ic_arrow_drop_down),
+                                    contentDescription = if (showAdvancedCustomSettings) "Collapse" else "Expand",
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                        }
 
-                        Spacer(modifier = Modifier.height(12.dp))
+                        AnimatedVisibility(visible = showAdvancedCustomSettings) {
+                            Column(modifier = Modifier.padding(top = 12.dp)) {
+                                OutlinedTextField(
+                                    value = customHeaders,
+                                    onValueChange = { 
+                                        customHeaders = it
+                                        settingsViewModel.updateLlmCustomHeaders(it)
+                                        selectedPreset = CustomServerPreset.CUSTOM
+                                        onResetVerificationState()
+                                    },
+                                    label = { Text("Custom Headers (JSON)") },
+                                    shape = RoundedCornerShape(12.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                )
 
-                        OutlinedTextField(
-                            value = customMessageFormat,
-                            onValueChange = { 
-                                customMessageFormat = it
-                                settingsViewModel.updateLlmCustomMessageFormat(it)
-                                onResetVerificationState()
-                            },
-                            label = { Text("Single Message Format (JSON)") },
-                            shape = RoundedCornerShape(12.dp),
-                            modifier = Modifier.fillMaxWidth()
-                        )
+                                Spacer(modifier = Modifier.height(12.dp))
 
-                        Spacer(modifier = Modifier.height(12.dp))
+                                OutlinedTextField(
+                                    value = customResponsePath,
+                                    onValueChange = { 
+                                        customResponsePath = it
+                                        settingsViewModel.updateLlmCustomResponsePath(it)
+                                        selectedPreset = CustomServerPreset.CUSTOM
+                                        onResetVerificationState()
+                                    },
+                                    label = { Text("Response Extraction JSON Path") },
+                                    shape = RoundedCornerShape(12.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                )
 
-                        OutlinedTextField(
-                            value = customSystemRole,
-                            onValueChange = { 
-                                customSystemRole = it
-                                settingsViewModel.updateLlmCustomSystemRole(it)
-                                onResetVerificationState()
-                            },
-                            label = { Text("System Role Mapping") },
-                            shape = RoundedCornerShape(12.dp),
-                            modifier = Modifier.fillMaxWidth()
-                        )
+                                Spacer(modifier = Modifier.height(12.dp))
 
-                        Spacer(modifier = Modifier.height(12.dp))
+                                OutlinedTextField(
+                                    value = customRequestTemplate,
+                                    onValueChange = { 
+                                        customRequestTemplate = it
+                                        settingsViewModel.updateLlmCustomRequestTemplate(it)
+                                        selectedPreset = CustomServerPreset.CUSTOM
+                                        onResetVerificationState()
+                                    },
+                                    label = { Text("Request Body JSON Template") },
+                                    shape = RoundedCornerShape(12.dp),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(120.dp),
+                                    maxLines = 10
+                                )
 
-                        OutlinedTextField(
-                            value = customUserRole,
-                            onValueChange = { 
-                                customUserRole = it
-                                settingsViewModel.updateLlmCustomUserRole(it)
-                                onResetVerificationState()
-                            },
-                            label = { Text("User Role Mapping") },
-                            shape = RoundedCornerShape(12.dp),
-                            modifier = Modifier.fillMaxWidth()
-                        )
+                                Spacer(modifier = Modifier.height(12.dp))
 
-                        Spacer(modifier = Modifier.height(12.dp))
+                                OutlinedTextField(
+                                    value = customMessageFormat,
+                                    onValueChange = { 
+                                        customMessageFormat = it
+                                        settingsViewModel.updateLlmCustomMessageFormat(it)
+                                        selectedPreset = CustomServerPreset.CUSTOM
+                                        onResetVerificationState()
+                                    },
+                                    label = { Text("Single Message Format (JSON)") },
+                                    shape = RoundedCornerShape(12.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                )
 
-                        OutlinedTextField(
-                            value = customAssistantRole,
-                            onValueChange = { 
-                                customAssistantRole = it
-                                settingsViewModel.updateLlmCustomAssistantRole(it)
-                                onResetVerificationState()
-                            },
-                            label = { Text("Assistant Role Mapping") },
-                            shape = RoundedCornerShape(12.dp),
-                            modifier = Modifier.fillMaxWidth()
-                        )
+                                Spacer(modifier = Modifier.height(12.dp))
+
+                                OutlinedTextField(
+                                    value = customSystemRole,
+                                    onValueChange = { 
+                                        customSystemRole = it
+                                        settingsViewModel.updateLlmCustomSystemRole(it)
+                                        selectedPreset = CustomServerPreset.CUSTOM
+                                        onResetVerificationState()
+                                    },
+                                    label = { Text("System Role Mapping") },
+                                    shape = RoundedCornerShape(12.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+
+                                Spacer(modifier = Modifier.height(12.dp))
+
+                                OutlinedTextField(
+                                    value = customUserRole,
+                                    onValueChange = { 
+                                        customUserRole = it
+                                        settingsViewModel.updateLlmCustomUserRole(it)
+                                        selectedPreset = CustomServerPreset.CUSTOM
+                                        onResetVerificationState()
+                                    },
+                                    label = { Text("User Role Mapping") },
+                                    shape = RoundedCornerShape(12.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+
+                                Spacer(modifier = Modifier.height(12.dp))
+
+                                OutlinedTextField(
+                                    value = customAssistantRole,
+                                    onValueChange = { 
+                                        customAssistantRole = it
+                                        settingsViewModel.updateLlmCustomAssistantRole(it)
+                                        selectedPreset = CustomServerPreset.CUSTOM
+                                        onResetVerificationState()
+                                    },
+                                    label = { Text("Assistant Role Mapping") },
+                                    shape = RoundedCornerShape(12.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -1281,8 +1557,13 @@ fun SettingsScreenContent(
                                 val value = jsonObject.getString(key)
                                 if (value.isNotBlank()) {
                                     apiKey2 = value
-                                    settingsViewModel.updateChatApiKey(value)
+                                    settingsViewModel.updateChatApiKey(value, provider)
                                     onResetVerificationState()
+                                    if (model.isBlank()) {
+                                        model = provider.defaultModel
+                                        settingsViewModel.updateLlmModel(provider.defaultModel)
+                                    }
+                                    onFetchModelsForProvider(provider, value, customUrl, customHeaders)
                                     importedKeys.add("Chat API Key")
                                 }
                                 break
@@ -1333,8 +1614,13 @@ fun SettingsScreenContent(
                             when (targetKeyField) {
                                 "chat" -> {
                                     apiKey2 = trimmed
-                                    settingsViewModel.updateChatApiKey(trimmed)
+                                    settingsViewModel.updateChatApiKey(trimmed, provider)
                                     onResetVerificationState()
+                                    if (model.isBlank()) {
+                                        model = provider.defaultModel
+                                        settingsViewModel.updateLlmModel(provider.defaultModel)
+                                    }
+                                    onFetchModelsForProvider(provider, trimmed, customUrl, customHeaders)
                                     android.widget.Toast.makeText(context, "Imported Chat API Key", android.widget.Toast.LENGTH_SHORT).show()
                                 }
                                 "youtube" -> {
@@ -1355,8 +1641,13 @@ fun SettingsScreenContent(
                         when (targetKeyField) {
                             "chat" -> {
                                 apiKey2 = trimmed
-                                settingsViewModel.updateChatApiKey(trimmed)
+                                settingsViewModel.updateChatApiKey(trimmed, provider)
                                 onResetVerificationState()
+                                if (model.isBlank()) {
+                                    model = provider.defaultModel
+                                    settingsViewModel.updateLlmModel(provider.defaultModel)
+                                }
+                                onFetchModelsForProvider(provider, trimmed, customUrl, customHeaders)
                                 android.widget.Toast.makeText(context, "Imported Chat API Key", android.widget.Toast.LENGTH_SHORT).show()
                             }
                             "youtube" -> {

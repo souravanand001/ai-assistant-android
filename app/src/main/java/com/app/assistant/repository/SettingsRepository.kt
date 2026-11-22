@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKeys
+import com.app.assistant.llm.LlmProvider
 
 class SettingsRepository(
     val context: Context,
@@ -36,12 +37,19 @@ class SettingsRepository(
         youtubeApiKey: String,
         chatApiKey: String,
         edgeTtsSubscriptionKey: String = "",
+        provider: LlmProvider? = null
     ) {
+        val currentProvider = provider ?: try {
+            LlmProvider.valueOf(getLlmProvider())
+        } catch (e: Exception) {
+            LlmProvider.GROQ
+        }
         with(securedPreferences.edit()) {
             if (youtubeApiKey.isNotBlank()) {
                 putString("youtube_api_key", youtubeApiKey)
             }
-            if (chatApiKey.isNotBlank()) {
+            putString("chat_api_key_${currentProvider.name}", chatApiKey)
+            if (currentProvider == LlmProvider.GROQ) {
                 putString("chat_api_key", chatApiKey)
             }
             if (edgeTtsSubscriptionKey.isNotBlank()) {
@@ -51,9 +59,43 @@ class SettingsRepository(
         }
     }
 
+    fun saveChatApiKey(provider: LlmProvider, key: String) {
+        with(securedPreferences.edit()) {
+            putString("chat_api_key_${provider.name}", key)
+            if (provider == LlmProvider.GROQ) {
+                putString("chat_api_key", key)
+            }
+            apply()
+        }
+    }
+
+    fun getChatApiKey(provider: LlmProvider): String? {
+        val key = securedPreferences.getString("chat_api_key_${provider.name}", null)
+        if (!key.isNullOrBlank()) return key
+        val legacyKey = securedPreferences.getString("chat_api_key", null)
+        if (!legacyKey.isNullOrBlank()) {
+            val savedProvider = try {
+                LlmProvider.valueOf(getLlmProvider())
+            } catch (e: Exception) {
+                LlmProvider.GROQ
+            }
+            if (provider == savedProvider || provider == LlmProvider.GROQ) {
+                return legacyKey
+            }
+        }
+        return null
+    }
+
     fun getYoutubeApiKey(): String? = securedPreferences.getString("youtube_api_key", null)
 
-    fun getChatApiKey(): String? = securedPreferences.getString("chat_api_key", null)
+    fun getChatApiKey(): String? {
+        val provider = try {
+            LlmProvider.valueOf(getLlmProvider())
+        } catch (e: Exception) {
+            LlmProvider.GROQ
+        }
+        return getChatApiKey(provider)
+    }
 
     fun getEdgeTtsSubscriptionKey(): String? = securedPreferences.getString("edge_tts_subscription_key", null)
 

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- Permit cleartext HTTP communication for custom local and self-hosted LLM endpoints (e.g. LAN IPs like 192.168.x.x) -->
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

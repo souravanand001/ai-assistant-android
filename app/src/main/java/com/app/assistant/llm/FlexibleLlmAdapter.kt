@@ -27,7 +27,8 @@ class FlexibleLlmAdapter(
         systemContext: String,
         messages: List<LlmMessage>
     ): String? {
-        val url = config.url
+        val completionUrl = if (provider == LlmProvider.CUSTOM) LlmConfig.resolveCompletionUrl(config.url) else config.url
+        val url = completionUrl
             .replace("{{API_KEY}}", apiKey)
             .replace("{{MODEL}}", model)
 
@@ -75,12 +76,20 @@ class FlexibleLlmAdapter(
         systemContext: String,
         messages: List<LlmMessage>
     ): Flow<String> = flow {
-        var url = config.url
+        val completionUrl = if (provider == LlmProvider.CUSTOM) LlmConfig.resolveCompletionUrl(config.url) else config.url
+        var url = completionUrl
             .replace("{{API_KEY}}", apiKey)
             .replace("{{MODEL}}", model)
 
         if (url.contains(":generateContent")) {
             url = url.replace(":generateContent", ":streamGenerateContent")
+            if (!url.contains("alt=sse")) {
+                url = if (url.contains("?")) {
+                    url.replace("?", "?alt=sse&")
+                } else {
+                    "$url?alt=sse"
+                }
+            }
         }
 
         val requestBuilder = Request.Builder().url(url)
@@ -138,7 +147,7 @@ class FlexibleLlmAdapter(
                     }
                     if (dataContent.isNotEmpty()) {
                         val chunkText = extractChunkContent(dataContent, config.responsePath)
-                        if (chunkText != null) {
+                        if (!chunkText.isNullOrEmpty()) {
                             emit(chunkText)
                         }
                     }
@@ -149,7 +158,7 @@ class FlexibleLlmAdapter(
                     }
                     if (cleanedLine.startsWith("{") && cleanedLine.endsWith("}")) {
                         val chunkText = extractChunkContent(cleanedLine, config.responsePath)
-                        if (chunkText != null) {
+                        if (!chunkText.isNullOrEmpty()) {
                             emit(chunkText)
                         }
                     }
@@ -193,14 +202,17 @@ class FlexibleLlmAdapter(
         val messagesJsonArray = serializedMessagesBuilder.toString()
 
         var requestBodyString = config.requestTemplate
-            .replace("{{MODEL}}", model)
+            .replace("{{MODEL}}", LlmConfig.escapeJsonString(model))
             .replace("{{MESSAGES}}", messagesJsonArray)
 
         if (hasSystemContextPlaceholder) {
-            requestBodyString = requestBodyString.replace("{{SYSTEM_CONTEXT}}", escapeJsonString(systemContext))
+            val resolvedSystemContext = systemContext.ifBlank {
+                if (provider == LlmProvider.GEMINI) "You are a helpful AI assistant." else ""
+            }
+            requestBodyString = requestBodyString.replace("{{SYSTEM_CONTEXT}}", escapeJsonString(resolvedSystemContext))
         }
 
-        if (isStream) {
+        if (isStream && provider != LlmProvider.GEMINI) {
             if (requestBodyString.contains("\"stream\": false")) {
                 requestBodyString = requestBodyString.replace("\"stream\": false", "\"stream\": true")
             } else if (!requestBodyString.contains("\"stream\"")) {
@@ -252,16 +264,26 @@ class FlexibleLlmAdapter(
 
     private fun extractChunkContent(jsonStr: String, path: String): String? {
         var extracted = extractValueFromJson(jsonStr, path)
-        if (extracted != null) return extracted
+        if (!extracted.isNullOrEmpty()) return extracted
 
         if (path == "choices[0].message.content") {
             extracted = extractValueFromJson(jsonStr, "choices[0].delta.content")
-            if (extracted != null) return extracted
+            if (!extracted.isNullOrEmpty()) return extracted
+        }
+
+        if (path == "content[0].text") {
+            extracted = extractValueFromJson(jsonStr, "delta.text")
+            if (!extracted.isNullOrEmpty()) return extracted
         }
         
-        for (fallbackPath in listOf("choices[0].delta.content", "message.content", "candidates[0].content.parts[0].text")) {
+        for (fallbackPath in listOf(
+            "choices[0].delta.content",
+            "delta.text",
+            "message.content",
+            "candidates[0].content.parts[0].text"
+        )) {
             extracted = extractValueFromJson(jsonStr, fallbackPath)
-            if (extracted != null) return extracted
+            if (!extracted.isNullOrEmpty()) return extracted
         }
         return null
     }
@@ -273,10 +295,10 @@ class FlexibleLlmAdapter(
                 val errorObj = element["error"]
                 if (errorObj is kotlinx.serialization.json.JsonObject) {
                     val msg = errorObj["message"]
-                    if (msg is kotlinx.serialization.json.JsonPrimitive) return msg.content
+                    if (msg is kotlinx.serialization.json.JsonPrimitive && msg !is kotlinx.serialization.json.JsonNull) return msg.content
                 }
                 val msg = element["message"] ?: element["error_description"] ?: element["msg"]
-                if (msg is kotlinx.serialization.json.JsonPrimitive) return msg.content
+                if (msg is kotlinx.serialization.json.JsonPrimitive && msg !is kotlinx.serialization.json.JsonNull) return msg.content
             }
             null
         } catch (e: Exception) {
@@ -320,10 +342,10 @@ class FlexibleLlmAdapter(
                     else -> return null
                 }
             }
-            if (currentElement is kotlinx.serialization.json.JsonPrimitive) {
+            if (currentElement is kotlinx.serialization.json.JsonPrimitive && currentElement !is kotlinx.serialization.json.JsonNull) {
                 currentElement.content
             } else {
-                currentElement.toString()
+                null
             }
         } catch (e: Exception) {
             null
