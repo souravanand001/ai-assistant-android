@@ -3,6 +3,8 @@ package com.app.assistant.viewmodel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.app.assistant.BuildConfig
+import com.app.assistant.llm.CustomServerPreset
+import com.app.assistant.llm.DetectedServerConfig
 import com.app.assistant.llm.LlmConfig
 import com.app.assistant.llm.LlmProvider
 import com.app.assistant.llm.ModelCapabilities
@@ -44,7 +46,8 @@ sealed class VerificationState {
 
 class SettingsViewModel(
     private val settingsRepository: SettingsRepository,
-    private val okHttpClient: OkHttpClient
+    private val okHttpClient: OkHttpClient,
+    private val customConfigHttpClient: OkHttpClient = okHttpClient
 ) : ViewModel() {
 
     private val modelManager = com.app.assistant.speech.SpeechModelManager(settingsRepository.context)
@@ -117,6 +120,20 @@ class SettingsViewModel(
     private val _modelFetchError = MutableStateFlow<String?>(null)
     val modelFetchError: StateFlow<String?> = _modelFetchError.asStateFlow()
 
+    private val _isAutoDetecting = MutableStateFlow(false)
+    val isAutoDetecting: StateFlow<Boolean> = _isAutoDetecting.asStateFlow()
+
+    private val _autoDetectStatus = MutableStateFlow<String?>(null)
+    val autoDetectStatus: StateFlow<String?> = _autoDetectStatus.asStateFlow()
+
+    private val _autoDetectSuccess = MutableStateFlow<Boolean?>(null)
+    val autoDetectSuccess: StateFlow<Boolean?> = _autoDetectSuccess.asStateFlow()
+
+    fun clearAutoDetectStatus() {
+        _autoDetectStatus.value = null
+        _autoDetectSuccess.value = null
+    }
+
     fun resetVerificationState() {
         _verificationState.value = VerificationState.Idle
     }
@@ -126,9 +143,13 @@ class SettingsViewModel(
         return if (key.isNullOrBlank()) BuildConfig.YOUTUBE_API_KEY else key
     }
 
-    fun loadChatKey(): String {
-        val key = settingsRepository.getChatApiKey()
-        return if (key.isNullOrBlank()) BuildConfig.GROQ_API_KEY else key
+    fun loadChatKey(provider: LlmProvider = loadLlmProvider()): String {
+        val key = settingsRepository.getChatApiKey(provider)
+        return if (key.isNullOrBlank()) {
+            if (provider == LlmProvider.GROQ) BuildConfig.GROQ_API_KEY else ""
+        } else {
+            key
+        }
     }
 
     fun loadEdgeTtsSubscriptionKey(): String {
@@ -283,12 +304,8 @@ class SettingsViewModel(
         )
     }
 
-    fun updateChatApiKey(key: String) {
-        settingsRepository.saveKeys(
-            youtubeApiKey = settingsRepository.getYoutubeApiKey() ?: "",
-            chatApiKey = key,
-            edgeTtsSubscriptionKey = settingsRepository.getEdgeTtsSubscriptionKey() ?: ""
-        )
+    fun updateChatApiKey(key: String, provider: LlmProvider = loadLlmProvider()) {
+        settingsRepository.saveChatApiKey(provider, key)
     }
 
     fun updateEdgeTtsSubscriptionKey(key: String) {
@@ -347,6 +364,151 @@ class SettingsViewModel(
         settingsRepository.setTtsMode(mode)
     }
 
+    fun autoDetectAndApplyConfig(
+        baseUrl: String,
+        apiKey: String,
+        onApplied: ((DetectedServerConfig) -> Unit)? = null
+    ) {
+        val trimmed = baseUrl.trim()
+        if (trimmed.isBlank()) {
+            _autoDetectStatus.value = "Please enter an API Endpoint URL first."
+            _autoDetectSuccess.value = false
+            return
+        }
+        viewModelScope.launch {
+            _isAutoDetecting.value = true
+            _autoDetectStatus.value = "Detecting server format..."
+            _autoDetectSuccess.value = null
+
+            try {
+                val detected = ModelCapabilityProber.autoDetectCustomServer(customConfigHttpClient, trimmed, apiKey)
+                if (detected != null) {
+                    updateLlmCustomUrl(detected.completionUrl)
+                    val headersJson = if (detected.headers.isNotEmpty()) {
+                        val entries = detected.headers.map { "\"${it.key}\": \"${it.value.replace("\"", "\\\"")}\"" }
+                        "{${entries.joinToString(", ")}}"
+                    } else "{}"
+                    updateLlmCustomHeaders(headersJson)
+                    updateLlmCustomResponsePath(detected.responsePath)
+                    updateLlmCustomRequestTemplate(detected.requestTemplate)
+                    updateLlmCustomMessageFormat(detected.messageFormat)
+                    updateLlmCustomSystemRole(detected.systemRole ?: "")
+                    updateLlmCustomUserRole(detected.userRole)
+                    updateLlmCustomAssistantRole(detected.assistantRole)
+
+                    if (detected.availableModels.isNotEmpty()) {
+                        _fetchedModels.value = _fetchedModels.value + (LlmProvider.CUSTOM to detected.availableModels)
+                        val currentModel = loadLlmModel()
+                        if (currentModel.isBlank() || currentModel == LlmProvider.CUSTOM.defaultModel || !detected.availableModels.contains(currentModel)) {
+                            val selectedModel = detected.availableModels.first()
+                            updateLlmModel(selectedModel)
+                        }
+                        _autoDetectStatus.value = "Detected ${detected.serverType}! Found ${detected.availableModels.size} model(s)."
+                    } else {
+                        _autoDetectStatus.value = "Detected ${detected.serverType}! Endpoint configured."
+                    }
+                    _autoDetectSuccess.value = true
+                    resetVerificationState()
+                    onApplied?.invoke(detected)
+                } else {
+                    _autoDetectStatus.value = "Could not auto-detect format. Using defaults; please check URL or configure below."
+                    _autoDetectSuccess.value = false
+                }
+            } catch (e: Exception) {
+                _autoDetectStatus.value = e.message ?: "Detection failed: ${e.message}"
+                _autoDetectSuccess.value = false
+            } finally {
+                _isAutoDetecting.value = false
+            }
+        }
+    }
+
+    fun applyCustomPreset(
+        preset: CustomServerPreset,
+        currentUrl: String,
+        apiKey: String,
+        onApplied: ((url: String, headers: String, respPath: String, template: String, format: String, sysRole: String, userRole: String, assRole: String) -> Unit)? = null
+    ) {
+        val trimmed = currentUrl.trim()
+        when (preset) {
+            CustomServerPreset.OPENAI_COMPATIBLE -> {
+                val resolvedUrl = if (trimmed.isNotBlank()) LlmConfig.resolveCompletionUrl(trimmed) else "https://api.example.com/v1/chat/completions"
+                val headersJson = if (apiKey.isNotBlank()) {
+                    "{\"Authorization\": \"Bearer {{API_KEY}}\", \"Content-Type\": \"application/json\"}"
+                } else {
+                    "{\"Content-Type\": \"application/json\"}"
+                }
+                val respPath = "choices[0].message.content"
+                val template = "{\n  \"model\": \"{{MODEL}}\",\n  \"messages\": {{MESSAGES}}\n}"
+                val format = "{\"role\": \"{{ROLE}}\", \"content\": \"{{CONTENT}}\"}"
+                val sysRole = "system"
+                val userRole = "user"
+                val assRole = "assistant"
+
+                updateLlmCustomUrl(resolvedUrl)
+                updateLlmCustomHeaders(headersJson)
+                updateLlmCustomResponsePath(respPath)
+                updateLlmCustomRequestTemplate(template)
+                updateLlmCustomMessageFormat(format)
+                updateLlmCustomSystemRole(sysRole)
+                updateLlmCustomUserRole(userRole)
+                updateLlmCustomAssistantRole(assRole)
+                resetVerificationState()
+                onApplied?.invoke(resolvedUrl, headersJson, respPath, template, format, sysRole, userRole, assRole)
+            }
+            CustomServerPreset.OLLAMA_NATIVE -> {
+                val resolvedUrl = if (trimmed.isNotBlank()) {
+                    val withoutSlash = trimmed.trimEnd('/')
+                    if (withoutSlash.endsWith("/api/chat")) withoutSlash else "$withoutSlash/api/chat"
+                } else "http://localhost:11434/api/chat"
+                val headersJson = "{\"Content-Type\": \"application/json\"}"
+                val respPath = "message.content"
+                val template = "{\n  \"model\": \"{{MODEL}}\",\n  \"messages\": {{MESSAGES}},\n  \"stream\": false\n}"
+                val format = "{\"role\": \"{{ROLE}}\", \"content\": \"{{CONTENT}}\"}"
+                val sysRole = "system"
+                val userRole = "user"
+                val assRole = "assistant"
+
+                updateLlmCustomUrl(resolvedUrl)
+                updateLlmCustomHeaders(headersJson)
+                updateLlmCustomResponsePath(respPath)
+                updateLlmCustomRequestTemplate(template)
+                updateLlmCustomMessageFormat(format)
+                updateLlmCustomSystemRole(sysRole)
+                updateLlmCustomUserRole(userRole)
+                updateLlmCustomAssistantRole(assRole)
+                resetVerificationState()
+                onApplied?.invoke(resolvedUrl, headersJson, respPath, template, format, sysRole, userRole, assRole)
+            }
+            CustomServerPreset.ANTHROPIC_COMPATIBLE -> {
+                val resolvedUrl = if (trimmed.isNotBlank()) {
+                    val withoutSlash = trimmed.trimEnd('/')
+                    if (withoutSlash.endsWith("/v1/messages")) withoutSlash else "$withoutSlash/v1/messages"
+                } else "https://api.anthropic.com/v1/messages"
+                val headersJson = "{\"x-api-key\": \"{{API_KEY}}\", \"anthropic-version\": \"2023-06-01\", \"Content-Type\": \"application/json\"}"
+                val respPath = "content[0].text"
+                val template = "{\n  \"model\": \"{{MODEL}}\",\n  \"max_tokens\": 1024,\n  \"system\": \"{{SYSTEM_CONTEXT}}\",\n  \"messages\": {{MESSAGES}}\n}"
+                val format = "{\"role\": \"{{ROLE}}\", \"content\": \"{{CONTENT}}\"}"
+                val sysRole = ""
+                val userRole = "user"
+                val assRole = "assistant"
+
+                updateLlmCustomUrl(resolvedUrl)
+                updateLlmCustomHeaders(headersJson)
+                updateLlmCustomResponsePath(respPath)
+                updateLlmCustomRequestTemplate(template)
+                updateLlmCustomMessageFormat(format)
+                updateLlmCustomSystemRole(sysRole)
+                updateLlmCustomUserRole(userRole)
+                updateLlmCustomAssistantRole(assRole)
+                resetVerificationState()
+                onApplied?.invoke(resolvedUrl, headersJson, respPath, template, format, sysRole, userRole, assRole)
+            }
+            CustomServerPreset.CUSTOM -> {
+                // Keep manual values
+            }
+        }
+    }
 
 
     fun verifyModelAndSaveCapabilities(
@@ -365,72 +527,80 @@ class SettingsViewModel(
         viewModelScope.launch {
             _verificationState.value = VerificationState.Verifying
             
-            val config = if (provider == LlmProvider.CUSTOM) {
-                LlmConfig(
-                    url = customUrl,
-                    headers = parseHeadersJson(customHeaders),
-                    responsePath = customResponsePath,
-                    requestTemplate = customRequestTemplate,
-                    messageFormat = customMessageFormat,
-                    systemRole = customSystemRole.takeIf { it.isNotBlank() },
-                    userRole = customUserRole,
-                    assistantRole = customAssistantRole
+            try {
+                val config = if (provider == LlmProvider.CUSTOM) {
+                    LlmConfig(
+                        url = customUrl,
+                        headers = parseHeadersJson(customHeaders),
+                        responsePath = customResponsePath,
+                        requestTemplate = customRequestTemplate,
+                        messageFormat = customMessageFormat,
+                        systemRole = customSystemRole.takeIf { it.isNotBlank() },
+                        userRole = customUserRole,
+                        assistantRole = customAssistantRole
+                    )
+                } else {
+                    provider.config
+                }
+
+                val clientToUse = if (provider == LlmProvider.CUSTOM) customConfigHttpClient else okHttpClient
+
+                // 1. Test Text connection
+                val isTextOk = ModelCapabilityProber.probeTextConnection(
+                    client = clientToUse,
+                    apiKey = apiKey,
+                    model = model,
+                    config = config
                 )
-            } else {
-                provider.config
-            }
 
-            // 1. Test Text connection
-            val isTextOk = ModelCapabilityProber.probeTextConnection(
-                client = okHttpClient,
-                apiKey = apiKey,
-                model = model,
-                config = config
-            )
+                if (!isTextOk) {
+                    _verificationState.value = VerificationState.Error("Connection check failed. Please verify API key, URL, or internet connection.")
+                    settingsRepository.setIsModelVerified(false)
+                    return@launch
+                }
 
-            if (!isTextOk) {
-                _verificationState.value = VerificationState.Error("Connection check failed. Please verify API key, URL, or internet connection.")
+                // 2. Test Vision (Image) connection
+                val isVisionOk = ModelCapabilityProber.probeVisionConnection(
+                    client = clientToUse,
+                    provider = provider,
+                    apiKey = apiKey,
+                    model = model,
+                    config = config
+                )
+
+                // 3. Audio/Video checks (currently Gemini 1.5/2.0 is the main provider that supports audio/video input natively in the API)
+                val hasAudio = provider == LlmProvider.GEMINI && (model.contains("1.5") || model.contains("2.0") || model.contains("2.5"))
+                val hasVideo = provider == LlmProvider.GEMINI && (model.contains("1.5") || model.contains("2.0") || model.contains("2.5"))
+                val hasDoc = (provider == LlmProvider.GEMINI && (model.contains("1.5") || model.contains("2.0") || model.contains("2.5"))) || (provider == LlmProvider.ANTHROPIC && model.contains("claude-3"))
+
+                val capabilities = ModelCapabilities(
+                    hasImageInput = isVisionOk,
+                    hasAudioInput = hasAudio,
+                    hasVideoInput = hasVideo,
+                    hasDocumentInput = hasDoc
+                )
+
+                // Save detected capabilities in repository
+                settingsRepository.setIsImageSupported(isVisionOk)
+                settingsRepository.setIsAudioSupported(hasAudio)
+                settingsRepository.setIsVideoSupported(hasVideo)
+                settingsRepository.setIsDocumentSupported(hasDoc)
+                settingsRepository.setIsModelVerified(true)
+
+                _verificationState.value = VerificationState.Success(capabilities)
+
+                // Auto-fetch models on successful connection verification
+                fetchModelsForProvider(
+                    provider = provider,
+                    apiKey = apiKey,
+                    customUrl = customUrl,
+                    customHeaders = customHeaders
+                )
+            } catch (e: Exception) {
+                val errorMsg = e.message ?: "Connection check failed. Please verify API key, URL, or internet connection."
+                _verificationState.value = VerificationState.Error(errorMsg)
                 settingsRepository.setIsModelVerified(false)
-                return@launch
             }
-
-            // 2. Test Vision (Image) connection
-            val isVisionOk = ModelCapabilityProber.probeVisionConnection(
-                client = okHttpClient,
-                provider = provider,
-                apiKey = apiKey,
-                model = model,
-                config = config
-            )
-
-            // 3. Audio/Video checks (currently Gemini 1.5/2.0 is the main provider that supports audio/video input natively in the API)
-            val hasAudio = provider == LlmProvider.GEMINI && (model.contains("1.5") || model.contains("2.0") || model.contains("2.5"))
-            val hasVideo = provider == LlmProvider.GEMINI && (model.contains("1.5") || model.contains("2.0") || model.contains("2.5"))
-            val hasDoc = (provider == LlmProvider.GEMINI && (model.contains("1.5") || model.contains("2.0") || model.contains("2.5"))) || (provider == LlmProvider.ANTHROPIC && model.contains("claude-3"))
-
-            val capabilities = ModelCapabilities(
-                hasImageInput = isVisionOk,
-                hasAudioInput = hasAudio,
-                hasVideoInput = hasVideo,
-                hasDocumentInput = hasDoc
-            )
-
-            // Save detected capabilities in repository
-            settingsRepository.setIsImageSupported(isVisionOk)
-            settingsRepository.setIsAudioSupported(hasAudio)
-            settingsRepository.setIsVideoSupported(hasVideo)
-            settingsRepository.setIsDocumentSupported(hasDoc)
-            settingsRepository.setIsModelVerified(true)
-
-            _verificationState.value = VerificationState.Success(capabilities)
-
-            // Auto-fetch models on successful connection verification
-            fetchModelsForProvider(
-                provider = provider,
-                apiKey = apiKey,
-                customUrl = customUrl,
-                customHeaders = customHeaders
-            )
         }
     }
 
@@ -441,15 +611,16 @@ class SettingsViewModel(
         customHeaders: String = ""
     ) {
         viewModelScope.launch {
-            if (apiKey.isBlank() && provider != LlmProvider.OLLAMA && provider != LlmProvider.OPEN_ROUTER) {
+            if (apiKey.isBlank() && provider != LlmProvider.OLLAMA && provider != LlmProvider.OPEN_ROUTER && provider != LlmProvider.CUSTOM) {
                 _modelFetchError.value = "API Key is required to fetch models."
                 return@launch
             }
             _isFetchingModels.value = true
             _modelFetchError.value = null
             try {
+                val clientToUse = if (provider == LlmProvider.CUSTOM) customConfigHttpClient else okHttpClient
                 val models = ModelCapabilityProber.fetchAvailableModels(
-                    client = okHttpClient,
+                    client = clientToUse,
                     provider = provider,
                     apiKey = apiKey,
                     customUrl = customUrl,
@@ -461,7 +632,7 @@ class SettingsViewModel(
                     _modelFetchError.value = "No models returned from API."
                 }
             } catch (e: Exception) {
-                _modelFetchError.value = "Failed to fetch models: ${e.message}"
+                _modelFetchError.value = e.message ?: "Failed to fetch models: ${e.message}"
             } finally {
                 _isFetchingModels.value = false
             }

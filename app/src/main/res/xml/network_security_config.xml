@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- Required only because Android XML cannot whitelist arbitrary LAN/Tailscale IPs.
+         HTTPS enforcement is handled in code via two isolated HTTP clients. -->
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

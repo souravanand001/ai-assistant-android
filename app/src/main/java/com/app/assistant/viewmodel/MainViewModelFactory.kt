@@ -15,6 +15,8 @@ import com.app.assistant.usecase.PlaySongUseCase
 import com.app.assistant.usecase.ProcessChatCommandUseCase
 import com.app.assistant.usecase.SetAlarmUseCase
 import com.app.assistant.usecase.SetReminderUseCase
+import com.app.assistant.network.LocalOnlyCleartextInterceptor
+import okhttp3.ConnectionSpec
 import okhttp3.OkHttpClient
 import java.util.concurrent.TimeUnit
 
@@ -29,13 +31,14 @@ class MainViewModelFactory(
             val dbRepo = DynamicConversationRepository(application)
             
             val okHttpClient = okHttpClient
+            val customConfigHttpClient = customConfigHttpClient
 
             val weatherRepo = WeatherRepository(application, okHttpClient)
 
             val permissionChecker = AndroidPermissionChecker(application)
             val resourceProvider = AndroidResourceProvider(application)
 
-            val getAiResponseUseCase = GetAiResponseUseCase(settingsRepo, okHttpClient)
+            val getAiResponseUseCase = GetAiResponseUseCase(settingsRepo, okHttpClient, customConfigHttpClient)
             val callContactUseCase = CallContactUseCase(permissionChecker, contactsRepo)
             val playSongUseCase = PlaySongUseCase(resourceProvider, settingsRepo, okHttpClient)
             val navigateUseCase = NavigateUseCase(resourceProvider)
@@ -68,6 +71,16 @@ class MainViewModelFactory(
                 .connectTimeout(60, TimeUnit.SECONDS)
                 .readTimeout(60, TimeUnit.SECONDS)
                 .writeTimeout(60, TimeUnit.SECONDS)
+                .connectionSpecs(listOf(ConnectionSpec.MODERN_TLS, ConnectionSpec.COMPATIBLE_TLS))
+                .followSslRedirects(false)
+                .build()
+        }
+
+        val customConfigHttpClient: OkHttpClient by lazy {
+            okHttpClient.newBuilder()
+                .connectionSpecs(listOf(ConnectionSpec.MODERN_TLS, ConnectionSpec.COMPATIBLE_TLS, ConnectionSpec.CLEARTEXT))
+                .followSslRedirects(false)
+                .addInterceptor(LocalOnlyCleartextInterceptor())
                 .build()
         }
     }

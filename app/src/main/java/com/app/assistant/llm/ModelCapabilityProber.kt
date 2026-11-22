@@ -1,6 +1,7 @@
 package com.app.assistant.llm
 
 import android.util.Log
+import java.io.IOException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
@@ -48,7 +49,7 @@ object ModelCapabilityProber {
             }
             LlmProvider.GROQ -> {
                 ModelCapabilities(
-                    hasImageInput = model.contains("vision") || model.contains("scout"),
+                    hasImageInput = model.contains("vision") || model.contains("scout") || model.contains("vl"),
                     hasAudioInput = false,
                     hasVideoInput = false,
                     hasDocumentInput = false
@@ -101,7 +102,9 @@ object ModelCapabilityProber {
         config: LlmConfig
     ): Boolean = withContext(Dispatchers.IO) {
         try {
-            val url = config.url
+            val completionUrl = LlmConfig.resolveCompletionUrl(config.url)
+            val escapedModel = LlmConfig.escapeJsonString(model)
+            val url = completionUrl
                 .replace("{{API_KEY}}", apiKey)
                 .replace("{{MODEL}}", model)
 
@@ -122,7 +125,7 @@ object ModelCapabilityProber {
             
             val messagesJsonArray = "[$msgJson]"
             var requestBodyString = config.requestTemplate
-                .replace("{{MODEL}}", model)
+                .replace("{{MODEL}}", escapedModel)
                 .replace("{{MESSAGES}}", messagesJsonArray)
 
             if (hasSystemContextPlaceholder) {
@@ -135,9 +138,20 @@ object ModelCapabilityProber {
 
             val request = requestBuilder.build()
             client.newCall(request).execute().use { response ->
-                Log.d("ModelCapabilityProber", "Text test response code: ${response.code}")
+                if (!response.isSuccessful) {
+                    val errorBody = response.body?.string()
+                    Log.w("ModelCapabilityProber", "Text test failed with code: ${response.code}, body: $errorBody")
+                } else {
+                    Log.d("ModelCapabilityProber", "Text test response code: ${response.code}")
+                }
                 response.isSuccessful
             }
+        } catch (e: IOException) {
+            Log.e("ModelCapabilityProber", "Text test failed with IOException: ${e.message}", e)
+            if (e.message?.contains("Insecure HTTP") == true) {
+                throw e
+            }
+            false
         } catch (e: Exception) {
             Log.e("ModelCapabilityProber", "Text test failed", e)
             false
@@ -152,7 +166,9 @@ object ModelCapabilityProber {
         config: LlmConfig
     ): Boolean = withContext(Dispatchers.IO) {
         try {
-            val url = config.url
+            val completionUrl = if (provider == LlmProvider.CUSTOM) LlmConfig.resolveCompletionUrl(config.url) else config.url
+            val escapedModel = LlmConfig.escapeJsonString(model)
+            val url = completionUrl
                 .replace("{{API_KEY}}", apiKey)
                 .replace("{{MODEL}}", model)
 
@@ -164,8 +180,8 @@ object ModelCapabilityProber {
                 requestBuilder.addHeader(key, resolvedValue)
             }
 
-            // 2x2 transparent PNG base64
-            val base64Image = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAC0lEQVR4nGNgQAcAABIAAXfx+gAAAAAASUVORK5CYII="
+            // 32x32 PNG base64 (Groq and certain vision models enforce a minimum dimension of at least 32x32 pixels)
+            val base64Image = "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAKUlEQVR4nO3NsQ0AAAzCMP5/mj5RNkuZ4zSZtr0DAAAAAAAAAACA/gEHMsP8LofXz44AAAAASUVORK5CYII="
             
             val requestBodyString = when (provider) {
                 LlmProvider.GEMINI -> {
@@ -185,7 +201,7 @@ object ModelCapabilityProber {
                 LlmProvider.ANTHROPIC -> {
                     """
                     {
-                      "model": "$model",
+                      "model": "$escapedModel",
                       "max_tokens": 10,
                       "messages": [{
                         "role": "user",
@@ -200,7 +216,7 @@ object ModelCapabilityProber {
                 else -> { // OpenAI-compatible schema (OpenAI, Groq, OpenRouter, Custom, Ollama, DeepSeek)
                     """
                     {
-                      "model": "$model",
+                      "model": "$escapedModel",
                       "max_tokens": 10,
                       "messages": [{
                         "role": "user",
@@ -220,9 +236,20 @@ object ModelCapabilityProber {
 
             val request = requestBuilder.build()
             client.newCall(request).execute().use { response ->
-                Log.d("ModelCapabilityProber", "Vision test response code: ${response.code}")
+                if (!response.isSuccessful) {
+                    val errorBody = response.body?.string()
+                    Log.w("ModelCapabilityProber", "Vision test failed with code: ${response.code}, body: $errorBody")
+                } else {
+                    Log.d("ModelCapabilityProber", "Vision test response code: ${response.code}")
+                }
                 response.isSuccessful
             }
+        } catch (e: IOException) {
+            Log.e("ModelCapabilityProber", "Vision test failed with IOException: ${e.message}", e)
+            if (e.message?.contains("Insecure HTTP") == true) {
+                throw e
+            }
+            false
         } catch (e: Exception) {
             Log.e("ModelCapabilityProber", "Vision test failed", e)
             false
@@ -254,13 +281,7 @@ object ModelCapabilityProber {
                 LlmProvider.ANTHROPIC -> "https://api.anthropic.com/v1/models"
                 LlmProvider.CUSTOM -> {
                     if (customUrl.isBlank()) return@withContext emptyList<String>()
-                    if (customUrl.endsWith("/chat/completions")) {
-                        customUrl.substringBeforeLast("/chat/completions") + "/models"
-                    } else if (customUrl.endsWith("/v1/chat/completions")) {
-                        customUrl.substringBeforeLast("/v1/chat/completions") + "/v1/models"
-                    } else {
-                        null
-                    }
+                    LlmConfig.resolveModelsUrl(customUrl)
                 }
             } ?: return@withContext emptyList<String>()
 
@@ -298,42 +319,81 @@ object ModelCapabilityProber {
                     return@withContext emptyList<String>()
                 }
                 val bodyString = response.body?.string() ?: return@withContext emptyList<String>()
-                
-                val element = Json.parseToJsonElement(bodyString)
-                val modelsList = mutableListOf<String>()
+                parseModelsResponse(provider, bodyString)
+            }
+        } catch (e: IOException) {
+            Log.e("ModelCapabilityProber", "Failed to fetch models: ${e.message}", e)
+            if (e.message?.contains("Insecure HTTP") == true) {
+                throw e
+            }
+            emptyList()
+        } catch (e: Exception) {
+            Log.e("ModelCapabilityProber", "Failed to fetch models", e)
+            emptyList()
+        }
+    }
 
-                when (provider) {
-                    LlmProvider.OLLAMA -> {
-                        val modelsArray = element.jsonObject["models"]?.jsonArray
-                        modelsArray?.forEach { modelObj ->
-                            modelObj.jsonObject["name"]?.jsonPrimitive?.content?.let { name ->
-                                modelsList.add(name)
-                            }
+    fun parseModelsResponse(provider: LlmProvider, bodyString: String): List<String> {
+        return try {
+            val element = Json.parseToJsonElement(bodyString)
+            val modelsList = mutableListOf<String>()
+
+            when (provider) {
+                LlmProvider.OLLAMA -> {
+                    val modelsArray = element.jsonObject["models"]?.jsonArray
+                    modelsArray?.forEach { modelObj ->
+                        modelObj.jsonObject["name"]?.jsonPrimitive?.content?.let { name ->
+                            modelsList.add(name)
                         }
                     }
-                    LlmProvider.GEMINI -> {
-                        val modelsArray = element.jsonObject["models"]?.jsonArray
-                        modelsArray?.forEach { modelObj ->
+                }
+                LlmProvider.GEMINI -> {
+                    val modelsArray = element.jsonObject["models"]?.jsonArray
+                    modelsArray?.forEach { modelObj ->
+                        val supportedMethods = modelObj.jsonObject["supportedGenerationMethods"]?.jsonArray?.map {
+                            it.jsonPrimitive.content
+                        } ?: emptyList()
+                        if (supportedMethods.contains("generateContent")) {
                             modelObj.jsonObject["name"]?.jsonPrimitive?.content?.let { name ->
                                 val cleanedName = if (name.startsWith("models/")) name.substringAfter("models/") else name
                                 modelsList.add(cleanedName)
                             }
                         }
                     }
-                    else -> {
-                        val dataArray = element.jsonObject["data"]?.jsonArray
-                        dataArray?.forEach { modelObj ->
-                            modelObj.jsonObject["id"]?.jsonPrimitive?.content?.let { id ->
-                                modelsList.add(id)
-                            }
+                }
+                LlmProvider.CUSTOM -> {
+                    val dataArray = element.jsonObject["data"]?.jsonArray
+                    dataArray?.forEach { modelObj ->
+                        val obj = modelObj.jsonObject
+                        val id = (obj["id"] as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { it !is kotlinx.serialization.json.JsonNull }?.content
+                            ?: (obj["name"] as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { it !is kotlinx.serialization.json.JsonNull }?.content
+                            ?: (obj["model"] as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { it !is kotlinx.serialization.json.JsonNull }?.content
+                        if (!id.isNullOrBlank()) {
+                            modelsList.add(id)
+                        }
+                    }
+                    val modelsArray = element.jsonObject["models"]?.jsonArray
+                    modelsArray?.forEach { modelObj ->
+                        val obj = modelObj.jsonObject
+                        val id = (obj["id"] as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { it !is kotlinx.serialization.json.JsonNull }?.content
+                            ?: (obj["name"] as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { it !is kotlinx.serialization.json.JsonNull }?.content
+                            ?: (obj["model"] as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { it !is kotlinx.serialization.json.JsonNull }?.content
+                        if (!id.isNullOrBlank()) {
+                            modelsList.add(id)
                         }
                     }
                 }
-                
-                modelsList.distinct().sorted()
+                else -> {
+                    val dataArray = element.jsonObject["data"]?.jsonArray
+                    dataArray?.forEach { modelObj ->
+                        modelObj.jsonObject["id"]?.jsonPrimitive?.content?.let { id ->
+                            modelsList.add(id)
+                        }
+                    }
+                }
             }
+            modelsList.distinct().sorted()
         } catch (e: Exception) {
-            Log.e("ModelCapabilityProber", "Failed to fetch models", e)
             emptyList()
         }
     }
@@ -352,4 +412,122 @@ object ModelCapabilityProber {
             emptyMap()
         }
     }
+
+    suspend fun autoDetectCustomServer(
+        client: OkHttpClient,
+        baseUrl: String,
+        apiKey: String = ""
+    ): DetectedServerConfig? = withContext(Dispatchers.IO) {
+        val trimmed = baseUrl.trim()
+        if (trimmed.isBlank()) return@withContext null
+
+        // 1. Try standard OpenAI /v1/models or /models endpoint
+        val modelsUrl = LlmConfig.resolveModelsUrl(trimmed)
+        if (modelsUrl != null) {
+            try {
+                val reqBuilder = Request.Builder().url(modelsUrl).get()
+                if (apiKey.isNotBlank()) {
+                    reqBuilder.addHeader("Authorization", "Bearer $apiKey")
+                }
+                client.newCall(reqBuilder.build()).execute().use { response ->
+                    if (response.isSuccessful) {
+                        val body = response.body?.string().orEmpty()
+                        val models = parseModelsResponse(LlmProvider.CUSTOM, body)
+                        val headersMap = if (apiKey.isNotBlank()) {
+                            mapOf("Authorization" to "Bearer {{API_KEY}}", "Content-Type" to "application/json")
+                        } else {
+                            mapOf("Content-Type" to "application/json")
+                        }
+                        return@withContext DetectedServerConfig(
+                            serverType = "OpenAI Compatible",
+                            completionUrl = LlmConfig.resolveCompletionUrl(trimmed),
+                            headers = headersMap,
+                            responsePath = "choices[0].message.content",
+                            requestTemplate = "{\n  \"model\": \"{{MODEL}}\",\n  \"messages\": {{MESSAGES}}\n}",
+                            messageFormat = "{\"role\": \"{{ROLE}}\", \"content\": \"{{CONTENT}}\"}",
+                            systemRole = "system",
+                            userRole = "user",
+                            assistantRole = "assistant",
+                            availableModels = models
+                        )
+                    }
+                }
+            } catch (e: IOException) {
+                Log.d("ModelCapabilityProber", "OpenAI endpoint probe failed: ${e.message}")
+                if (e.message?.contains("Insecure HTTP") == true) {
+                    throw e
+                }
+            } catch (e: Exception) {
+                Log.d("ModelCapabilityProber", "OpenAI endpoint probe failed: ${e.message}")
+            }
+        }
+
+        // 2. Try Ollama native /api/tags endpoint
+        val withoutSlash = trimmed.trimEnd('/')
+        val ollamaTagsUrl = if (withoutSlash.endsWith("/api/chat")) {
+            withoutSlash.substringBeforeLast("/api/chat") + "/api/tags"
+        } else if (withoutSlash.endsWith("/api/tags")) {
+            withoutSlash
+        } else {
+            "$withoutSlash/api/tags"
+        }
+
+        try {
+            val reqBuilder = Request.Builder().url(ollamaTagsUrl).get()
+            client.newCall(reqBuilder.build()).execute().use { response ->
+                if (response.isSuccessful) {
+                    val body = response.body?.string().orEmpty()
+                    val models = parseModelsResponse(LlmProvider.OLLAMA, body)
+                    val chatUrl = if (withoutSlash.endsWith("/api/tags")) {
+                        withoutSlash.substringBeforeLast("/api/tags") + "/api/chat"
+                    } else if (withoutSlash.endsWith("/api/chat")) {
+                        withoutSlash
+                    } else {
+                        "$withoutSlash/api/chat"
+                    }
+                    return@withContext DetectedServerConfig(
+                        serverType = "Ollama Native",
+                        completionUrl = chatUrl,
+                        headers = mapOf("Content-Type" to "application/json"),
+                        responsePath = "message.content",
+                        requestTemplate = "{\n  \"model\": \"{{MODEL}}\",\n  \"messages\": {{MESSAGES}},\n  \"stream\": false\n}",
+                        messageFormat = "{\"role\": \"{{ROLE}}\", \"content\": \"{{CONTENT}}\"}",
+                        systemRole = "system",
+                        userRole = "user",
+                        assistantRole = "assistant",
+                        availableModels = models
+                    )
+                }
+            }
+        } catch (e: IOException) {
+            Log.d("ModelCapabilityProber", "Ollama endpoint probe failed: ${e.message}")
+            if (e.message?.contains("Insecure HTTP") == true) {
+                throw e
+            }
+        } catch (e: Exception) {
+            Log.d("ModelCapabilityProber", "Ollama endpoint probe failed: ${e.message}")
+        }
+
+        null
+    }
+}
+
+data class DetectedServerConfig(
+    val serverType: String,
+    val completionUrl: String,
+    val headers: Map<String, String>,
+    val responsePath: String,
+    val requestTemplate: String,
+    val messageFormat: String,
+    val systemRole: String?,
+    val userRole: String,
+    val assistantRole: String,
+    val availableModels: List<String>
+)
+
+enum class CustomServerPreset(val displayName: String, val description: String) {
+    OPENAI_COMPATIBLE("OpenAI Compatible", "llama.cpp, vLLM, LM Studio, Ollama /v1, LocalAI"),
+    OLLAMA_NATIVE("Ollama Native", "Ollama /api/chat endpoint"),
+    ANTHROPIC_COMPATIBLE("Anthropic Compatible", "Claude /v1/messages proxy"),
+    CUSTOM("Custom / Manual", "Full manual configuration")
 }

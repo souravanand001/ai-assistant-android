@@ -12,6 +12,7 @@ enum class LlmProvider(
         defaultUrl = "https://api.groq.com/openai/v1/chat/completions",
         defaultModel = "llama-3.3-70b-versatile",
         suggestedModels = listOf(
+            "qwen/qwen3.8-27b",
             "llama-3.3-70b-versatile",
             "llama-3.1-8b-instant",
             "mixtral-8x7b-32768",
@@ -62,8 +63,7 @@ enum class LlmProvider(
             requestTemplate = """
                 {
                   "model": "{{MODEL}}",
-                  "messages": {{MESSAGES}},
-                  "temperature": 0.7
+                  "messages": {{MESSAGES}}
                 }
             """.trimIndent()
         )
@@ -160,11 +160,11 @@ enum class LlmProvider(
         defaultUrl = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent",
         defaultModel = "gemini-1.5-flash",
         suggestedModels = listOf(
-            "gemini-2.5-flash",
-            "gemini-2.5-pro",
+            "gemini-2.0-flash",
+            "gemini-2.0-flash-lite",
             "gemini-1.5-flash",
             "gemini-1.5-pro",
-            "gemini-1.0-pro"
+            "gemini-1.5-flash-8b"
         ),
         config = LlmConfig(
             url = "https://generativelanguage.googleapis.com/v1beta/models/{{MODEL}}:generateContent?key={{API_KEY}}",
