@@ -64,7 +64,8 @@ class MainActivity : ComponentActivity() {
     private val settingsViewModel: SettingsViewModel by viewModels {
         SettingsViewModelFactory(
             com.app.assistant.repository.SettingsRepository(application),
-            com.app.assistant.viewmodel.MainViewModelFactory.okHttpClient
+            com.app.assistant.viewmodel.MainViewModelFactory.okHttpClient,
+            com.app.assistant.viewmodel.MainViewModelFactory.customConfigHttpClient
         )
     }
 

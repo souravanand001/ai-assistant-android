@@ -65,7 +65,12 @@ class FlexibleLlmAdapter(
                 """{"error_code": 503, "msg": "Seems this device is offline. Maybe try checking data connection."}"""
             } catch (e: Exception) {
                 Log.e("FlexibleLlmAdapter", "Error during LLM API call", e)
-                """{"error_code": 500, "msg": "Seems some issue in LLM server. Please try again."}"""
+                val msg = if (e is IOException && e.message?.contains("Insecure HTTP") == true) {
+                    e.message!!
+                } else {
+                    "Seems some issue in LLM server. Please try again."
+                }
+                """{"error_code": 500, "msg": "$msg"}"""
             }
         }
 
@@ -107,16 +112,21 @@ class FlexibleLlmAdapter(
         requestBuilder.post(requestBody)
         val request = requestBuilder.build()
 
+        var networkErrorMessage: String? = null
         val response = try {
             client.newCall(request).execute()
         } catch (e: UnknownHostException) {
+            networkErrorMessage = "Seems this device is offline. Maybe try checking data connection."
             null
         } catch (e: Exception) {
+            if (e is IOException && e.message?.contains("Insecure HTTP") == true) {
+                networkErrorMessage = e.message
+            }
             null
         }
 
         if (response == null) {
-            emit("Seems this device is offline or LLM server is unreachable.")
+            emit(networkErrorMessage ?: "Seems this device is offline or LLM server is unreachable.")
             return@flow
         }
 

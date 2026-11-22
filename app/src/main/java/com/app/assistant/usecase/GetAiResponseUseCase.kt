@@ -13,7 +13,8 @@ import okhttp3.OkHttpClient
 
 class GetAiResponseUseCase(
     private val settingsRepository: SettingsRepository,
-    private val client: OkHttpClient
+    private val client: OkHttpClient,
+    private val customClient: OkHttpClient = client
 ) {
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -47,8 +48,9 @@ class GetAiResponseUseCase(
             provider.config
         }
 
+        val httpClient = if (provider == LlmProvider.CUSTOM) customClient else client
         val adapter = FlexibleLlmAdapter(
-            client = client,
+            client = httpClient,
             apiKey = apiKey ?: "",
             model = model,
             config = config,
@@ -89,8 +91,9 @@ class GetAiResponseUseCase(
             provider.config
         }
 
+        val httpClient = if (provider == LlmProvider.CUSTOM) customClient else client
         val adapter = FlexibleLlmAdapter(
-            client = client,
+            client = httpClient,
             apiKey = apiKey ?: "",
             model = model,
             config = config,

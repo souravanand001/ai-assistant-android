@@ -1,6 +1,7 @@
 package com.app.assistant.llm
 
 import android.util.Log
+import java.io.IOException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
@@ -145,6 +146,12 @@ object ModelCapabilityProber {
                 }
                 response.isSuccessful
             }
+        } catch (e: IOException) {
+            Log.e("ModelCapabilityProber", "Text test failed with IOException: ${e.message}", e)
+            if (e.message?.contains("Insecure HTTP") == true) {
+                throw e
+            }
+            false
         } catch (e: Exception) {
             Log.e("ModelCapabilityProber", "Text test failed", e)
             false
@@ -237,6 +244,12 @@ object ModelCapabilityProber {
                 }
                 response.isSuccessful
             }
+        } catch (e: IOException) {
+            Log.e("ModelCapabilityProber", "Vision test failed with IOException: ${e.message}", e)
+            if (e.message?.contains("Insecure HTTP") == true) {
+                throw e
+            }
+            false
         } catch (e: Exception) {
             Log.e("ModelCapabilityProber", "Vision test failed", e)
             false
@@ -308,6 +321,12 @@ object ModelCapabilityProber {
                 val bodyString = response.body?.string() ?: return@withContext emptyList<String>()
                 parseModelsResponse(provider, bodyString)
             }
+        } catch (e: IOException) {
+            Log.e("ModelCapabilityProber", "Failed to fetch models: ${e.message}", e)
+            if (e.message?.contains("Insecure HTTP") == true) {
+                throw e
+            }
+            emptyList()
         } catch (e: Exception) {
             Log.e("ModelCapabilityProber", "Failed to fetch models", e)
             emptyList()
@@ -433,6 +452,11 @@ object ModelCapabilityProber {
                         )
                     }
                 }
+            } catch (e: IOException) {
+                Log.d("ModelCapabilityProber", "OpenAI endpoint probe failed: ${e.message}")
+                if (e.message?.contains("Insecure HTTP") == true) {
+                    throw e
+                }
             } catch (e: Exception) {
                 Log.d("ModelCapabilityProber", "OpenAI endpoint probe failed: ${e.message}")
             }
@@ -474,6 +498,11 @@ object ModelCapabilityProber {
                         availableModels = models
                     )
                 }
+            }
+        } catch (e: IOException) {
+            Log.d("ModelCapabilityProber", "Ollama endpoint probe failed: ${e.message}")
+            if (e.message?.contains("Insecure HTTP") == true) {
+                throw e
             }
         } catch (e: Exception) {
             Log.d("ModelCapabilityProber", "Ollama endpoint probe failed: ${e.message}")
