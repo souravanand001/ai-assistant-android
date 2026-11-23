@@ -96,6 +96,10 @@ fun SettingsScreen(
     onTranslationEnabledChange: (Boolean) -> Unit,
     onLanguageSelected: (String) -> Unit,
 ) {
+    LaunchedEffect(Unit) {
+        settingsViewModel.refreshModelStatus()
+    }
+
     val initialYoutubeKey = remember { settingsViewModel.loadYoutubeKey() }
     val initialEdgeTtsKey = remember { settingsViewModel.loadEdgeTtsSubscriptionKey() }
     val initialProvider = remember { settingsViewModel.loadLlmProvider() }
@@ -279,6 +283,7 @@ fun SettingsScreenContent(
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 settingsViewModel.checkDefaultAssistantStatus()
+                settingsViewModel.refreshModelStatus()
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
