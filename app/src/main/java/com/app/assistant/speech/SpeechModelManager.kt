@@ -14,42 +14,35 @@ import java.util.concurrent.atomic.AtomicBoolean
 class SpeechModelManager(private val context: Context) {
 
     private val modelDir = File(context.filesDir, "sherpa-onnx")
+    private val markerFile = File(modelDir, ".installed")
 
     data class ModelFileDesc(
         val url: String,
-        val localName: String,
-        val sizeBytes: Long
+        val localName: String
     )
 
     private val modelFiles = listOf(
         ModelFileDesc(
             url = "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8/resolve/main/encoder.int8.onnx",
-            localName = "parakeet-encoder.onnx",
-            sizeBytes = 652184296L
+            localName = "parakeet-encoder.onnx"
         ),
         ModelFileDesc(
             url = "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8/resolve/main/decoder.int8.onnx",
-            localName = "parakeet-decoder.onnx",
-            sizeBytes = 7257753L
+            localName = "parakeet-decoder.onnx"
         ),
         ModelFileDesc(
             url = "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8/resolve/main/joiner.int8.onnx",
-            localName = "parakeet-joiner.onnx",
-            sizeBytes = 1739080L
+            localName = "parakeet-joiner.onnx"
         ),
         ModelFileDesc(
             url = "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8/resolve/main/tokens.txt",
-            localName = "parakeet-tokens.txt",
-            sizeBytes = 9384L
+            localName = "parakeet-tokens.txt"
         ),
         ModelFileDesc(
             url = "https://huggingface.co/csukuangfj/vad/resolve/main/silero_vad.onnx",
-            localName = "silero_vad.onnx",
-            sizeBytes = 1807522L
+            localName = "silero_vad.onnx"
         )
     )
-
-    val totalSizeBytes: Long = modelFiles.sumOf { it.sizeBytes }
 
     private var currentCall: okhttp3.Call? = null
     private val isCancelled = AtomicBoolean(false)
@@ -58,15 +51,38 @@ class SpeechModelManager(private val context: Context) {
 
     fun isModelDownloaded(): Boolean {
         if (!modelDir.exists()) return false
-        return modelFiles.all { fileDesc ->
+
+        val allFilesExistAndNonEmpty = modelFiles.all { fileDesc ->
             val file = File(modelDir, fileDesc.localName)
-            file.exists() && file.length() == fileDesc.sizeBytes
+            file.exists() && file.length() > 0
         }
+        if (!allFilesExistAndNonEmpty) return false
+
+        // If marker file exists, model is fully and reliably downloaded
+        if (markerFile.exists()) return true
+
+        // Backward compatibility / migration:
+        // If files already exist with substantial size (encoder > 100 MB), auto-create marker file
+        val encoder = File(modelDir, "parakeet-encoder.onnx")
+        if (encoder.length() > 100 * 1024 * 1024L) {
+            try {
+                markerFile.writeText("version=1\ntimestamp=${System.currentTimeMillis()}\n")
+                return true
+            } catch (e: Exception) {
+                Log.w("SpeechModelManager", "Could not write .installed marker file", e)
+                return true
+            }
+        }
+
+        return false
     }
 
     fun deleteLocalModel(): Boolean {
         if (!modelDir.exists()) return true
         var allDeleted = true
+        if (markerFile.exists()) {
+            if (!markerFile.delete()) allDeleted = false
+        }
         modelFiles.forEach { fileDesc ->
             val file = File(modelDir, fileDesc.localName)
             if (file.exists()) {
@@ -100,15 +116,33 @@ class SpeechModelManager(private val context: Context) {
                     modelDir.mkdirs()
                 }
 
+                // Query total expected size dynamically from server headers or local files
+                var totalBytes = 0L
+                for (fileDesc in modelFiles) {
+                    val targetFile = File(modelDir, fileDesc.localName)
+                    if (markerFile.exists() && targetFile.exists() && targetFile.length() > 0) {
+                        totalBytes += targetFile.length()
+                    } else {
+                        try {
+                            val headReq = Request.Builder().url(fileDesc.url).head().build()
+                            client.newCall(headReq).execute().use { resp ->
+                                totalBytes += resp.header("Content-Length")?.toLongOrNull() ?: 0L
+                            }
+                        } catch (e: Exception) {
+                            // If HEAD fails, progress can adapt dynamically
+                        }
+                    }
+                }
+
                 var cumulativeDownloaded = 0L
 
                 for (fileDesc in modelFiles) {
                     val targetFile = File(modelDir, fileDesc.localName)
                     
-                    // If file is already fully and correctly downloaded, we skip it
-                    if (targetFile.exists() && targetFile.length() == fileDesc.sizeBytes) {
-                        cumulativeDownloaded += fileDesc.sizeBytes
-                        onProgress(cumulativeDownloaded, totalSizeBytes)
+                    // If model is already marked installed and this file is valid, skip it
+                    if (markerFile.exists() && targetFile.exists() && targetFile.length() > 0) {
+                        cumulativeDownloaded += targetFile.length()
+                        onProgress(cumulativeDownloaded, totalBytes)
                         continue
                     }
 
@@ -135,7 +169,11 @@ class SpeechModelManager(private val context: Context) {
                     }
 
                     val responseBody = response.body ?: throw IOException("Empty response body for ${fileDesc.localName}")
-                    
+                    val fileLength = responseBody.contentLength()
+                    if (totalBytes == 0L && fileLength > 0) {
+                        totalBytes = fileLength
+                    }
+
                     responseBody.byteStream().use { inputStream ->
                         FileOutputStream(tmpFile).use { outputStream ->
                             val buffer = ByteArray(1024 * 64) // 64kb buffer
@@ -148,7 +186,7 @@ class SpeechModelManager(private val context: Context) {
                                 }
                                 outputStream.write(buffer, 0, bytesRead)
                                 fileDownloaded += bytesRead
-                                onProgress(cumulativeDownloaded + fileDownloaded, totalSizeBytes)
+                                onProgress(cumulativeDownloaded + fileDownloaded, totalBytes)
                             }
                             outputStream.flush()
                         }
@@ -160,13 +198,17 @@ class SpeechModelManager(private val context: Context) {
                     }
 
                     // Rename tmp to actual
-                    if (tmpFile.renameTo(targetFile)) {
-                        cumulativeDownloaded += fileDesc.sizeBytes
-                        onProgress(cumulativeDownloaded, totalSizeBytes)
+                    val renamed = tmpFile.renameTo(targetFile) || (targetFile.delete() && tmpFile.renameTo(targetFile))
+                    if (renamed) {
+                        cumulativeDownloaded += targetFile.length()
+                        onProgress(cumulativeDownloaded, totalBytes)
                     } else {
                         throw IOException("Failed to rename temporary file for ${fileDesc.localName}")
                     }
                 }
+
+                // All files successfully downloaded: write marker file
+                markerFile.writeText("version=1\ntimestamp=${System.currentTimeMillis()}\n")
 
                 currentCall = null
                 onComplete(true, null)

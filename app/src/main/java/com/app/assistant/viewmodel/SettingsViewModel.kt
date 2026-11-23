@@ -57,6 +57,13 @@ class SettingsViewModel(
     val modelDownloadState: StateFlow<DownloadState> = _modelDownloadState.asStateFlow()
 
     private val _isModelInstalled = MutableStateFlow(modelManager.isModelDownloaded())
+    val isModelInstalled: StateFlow<Boolean> = _isModelInstalled.asStateFlow()
+
+    private val _ttsModelDownloadState = MutableStateFlow<DownloadState>(DownloadState.Idle)
+    val ttsModelDownloadState: StateFlow<DownloadState> = _ttsModelDownloadState.asStateFlow()
+
+    private val _isTtsModelInstalled = MutableStateFlow(ttsModelManager.isModelDownloaded())
+    val isTtsModelInstalled: StateFlow<Boolean> = _isTtsModelInstalled.asStateFlow()
 
     private val _isTranslationEnabled = MutableStateFlow(settingsRepository.getIsTranslationEnabled())
     val isTranslationEnabled: StateFlow<Boolean> = _isTranslationEnabled.asStateFlow()
@@ -80,6 +87,20 @@ class SettingsViewModel(
         translationLanguages = getPublicStaticFinalStringsWithNames(TranslateLanguage::class.java)
         refreshDownloadedTranslationModels()
         checkDefaultAssistantStatus()
+        refreshModelStatus()
+    }
+
+    fun refreshModelStatus() {
+        val downloaded = modelManager.isModelDownloaded()
+        _isModelInstalled.value = downloaded
+        if (!downloaded && _modelDownloadState.value !is DownloadState.Downloading) {
+            _modelDownloadState.value = DownloadState.Idle
+        }
+        val ttsDownloaded = ttsModelManager.isModelDownloaded()
+        _isTtsModelInstalled.value = ttsDownloaded
+        if (!ttsDownloaded && _ttsModelDownloadState.value !is DownloadState.Downloading) {
+            _ttsModelDownloadState.value = DownloadState.Idle
+        }
     }
 
     fun checkDefaultAssistantStatus() {
@@ -99,14 +120,6 @@ class SettingsViewModel(
         }
         _isDefaultAssistant.value = isDefault
     }
-
-    val isModelInstalled: StateFlow<Boolean> = _isModelInstalled.asStateFlow()
-
-    private val _ttsModelDownloadState = MutableStateFlow<DownloadState>(DownloadState.Idle)
-    val ttsModelDownloadState: StateFlow<DownloadState> = _ttsModelDownloadState.asStateFlow()
-
-    private val _isTtsModelInstalled = MutableStateFlow(ttsModelManager.isModelDownloaded())
-    val isTtsModelInstalled: StateFlow<Boolean> = _isTtsModelInstalled.asStateFlow()
 
     private val _verificationState = MutableStateFlow<VerificationState>(VerificationState.Idle)
     val verificationState: StateFlow<VerificationState> = _verificationState.asStateFlow()
@@ -201,7 +214,7 @@ class SettingsViewModel(
 
     fun startModelDownload() {
         viewModelScope.launch {
-            _modelDownloadState.value = DownloadState.Downloading(0f, 0L, modelManager.totalSizeBytes)
+            _modelDownloadState.value = DownloadState.Downloading(0f, 0L, 0L)
             modelManager.downloadModel(
                 client = okHttpClient,
                 onProgress = { downloadedBytes, totalBytes ->
